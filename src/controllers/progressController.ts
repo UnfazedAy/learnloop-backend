@@ -2,108 +2,137 @@ import { supabase } from "../config/database";
 import { asyncHandler } from "../middleWares/errorHandler";
 import ErrorResponse from "../utils/errorResponse";
 import { Request, Response, NextFunction } from "express";
-import { ProgressEntry } from "../types/types";
+import { ProgressEntry, Frequency } from "../types/types";
 import { updateStreak } from "../utils/streakUpdater";
 
 export const logProgress = asyncHandler(async (
-    req: Request<{ goalId: string }, object, ProgressEntry>,
-    res: Response,
-    next: NextFunction
-  ) => {
-    const { value, notes } = req.body;
-    const { id: userId } = req.user as { id: string };
-    const { goalId } = req.params;
+  req: Request<{ goalId: string }, object, ProgressEntry>,
+  res: Response,
+  next: NextFunction
+) => {
+  const { value, notes } = req.body;
+  const { id: userId } = req.user;
+  const { goalId } = req.params;
 
-    // Validate the request body
-    if (!value) {
-      return next(new ErrorResponse("Please provide a value", 400));
-    }
+  if (value == null || value < 0)
+    return next(new ErrorResponse("Progress value must be >= 0", 400));
 
-    if (value < 0) {
-      return next(new ErrorResponse("Progress value cannot be negative", 400));
-    }
+  // Fetch goal
+  const { data: goalData, error: goalErr } = await supabase
+    .from("goals")
+    .select("*")
+    .eq("id", goalId)
+    .eq("user_id", userId)
+    .single();
 
-    // check if goal exists and belongs to the user
-    const { data: goalData, error: goalError } = await supabase
-      .from("goals")
-      .select("*")
-      .eq("id", goalId)
-      .eq("user_id", userId)
-      .single();
-  
-    if (goalError || !goalData) {
-      return next(new ErrorResponse("Goal not found", 404));
-    }
+  if (goalErr || !goalData)
+    return next(new ErrorResponse("Goal not found", 404));
 
-    const today = new Date().toISOString().split('T')[0]; // Get YYYY-MM-DD format
+  const today = new Date().toISOString().split("T")[0];
 
-    // Check if progress entry already exists for today
-    const { data: existingProgress } = await supabase
+  // Check if today's progress exists
+  const { data: existing } = await supabase
+    .from("progress_entries")
+    .select("*")
+    .eq("user_id", userId)
+    .eq("goal_id", goalId)
+    .eq("date", today)
+    .single();
+
+  let progressEntry;
+
+  if (existing) {
+    const { data, error } = await supabase
       .from("progress_entries")
+      .update({
+        value,
+        notes,
+        updated_at: new Date(),
+      })
+      .eq("id", existing.id)
       .select("*")
-      .eq("user_id", userId)
-      .eq("goal_id", goalId)
-      .eq("date", today)
       .single();
 
-    let progressEntry;
+    if (error) return next(new ErrorResponse(error.message, 500));
+    progressEntry = data;
 
-    if (existingProgress) {
-      // Update existing progress
-      const { data, error } = await supabase
-        .from("progress_entries")
-        .update({
-          value,
-          notes,
-          updated_at: new Date()
-        })
-        .eq("id", existingProgress.id)
-        .select("*")
-        .single();
+  } else {
+    const { data, error } = await supabase
+      .from("progress_entries")
+      .insert({
+        user_id: userId,
+        goal_id: goalId,
+        value,
+        notes,
+        date: today,
+      })
+      .select("*")
+      .single();
 
-      if (error) {
-        return next(new ErrorResponse(error.message, 500));
-      }
-      progressEntry = data;
-    } else {
-      // Create new progress entry
-      const { data, error } = await supabase
-        .from("progress_entries")
-        .insert({
-          user_id: userId,
-          goal_id: goalId,
-          date: today,
-          value,
-          notes
-        })
-        .select("*")
-        .single();
-
-      if (error) {
-        return next(new ErrorResponse(error.message, 500));
-      }
-      progressEntry = data;
-    }
-
-    // Check if goal is completed for today and update streak
-    const isGoalCompleted = value >= goalData.target_value;
-    
-    if (isGoalCompleted) {
-      // Update or create streak entry
-      await updateStreak(userId, goalId, today);
-    }
-
-    res.status(200).json({
-      success: true,
-      data: {
-        progress: progressEntry,
-        goalCompleted: isGoalCompleted,
-        goal: goalData
-      },
-      message: existingProgress ? "Progress updated successfully" : "Progress logged successfully",
-    });
+    if (error) return next(new ErrorResponse(error.message, 500));
+    progressEntry = data;
   }
-);
+
+  // -----------------------------------------------------
+  // PERIOD COMPLETION LOGIC
+  // -----------------------------------------------------
+
+  const now = new Date();
+  let periodStart = new Date(now);
+  let periodEnd = new Date(now);
+
+  if (goalData.frequency === Frequency.DAILY) {
+    // Start and end are today — no change needed
+  }
+
+  if (goalData.frequency === Frequency.WEEKLY) {
+    // Monday: 1, Sunday: 0
+    const day = now.getDay();
+    const mondayOffset = day === 0 ? -6 : 1 - day;
+
+    periodStart.setDate(now.getDate() + mondayOffset);
+    periodEnd = new Date(periodStart);
+    periodEnd.setDate(periodStart.getDate() + 6);
+  }
+
+  if (goalData.frequency === Frequency.MONTHLY) {
+    periodStart = new Date(now.getFullYear(), now.getMonth(), 1);
+    periodEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0);
+  }
+
+  const startStr = periodStart.toISOString().split("T")[0];
+  const endStr = periodEnd.toISOString().split("T")[0];
+
+  // Sum progress for entire period
+  const { data: periodRows } = await supabase
+    .from("progress_entries")
+    .select("value")
+    .eq("user_id", userId)
+    .eq("goal_id", goalId)
+    .gte("date", startStr)
+    .lte("date", endStr);
+
+  const totalProgress = (periodRows || []).reduce((sum, p) => sum + p.value, 0);
+
+  const isPeriodCompleted = totalProgress >= goalData.target_value;
+
+  // Update streak only when period completes
+  if (isPeriodCompleted) {
+    await updateStreak(userId, goalId, today, goalData.frequency);
+  }
+
+  return res.status(200).json({
+    success: true,
+    message: existing ? "Progress updated successfully" : "Progress logged successfully",
+    data: {
+      progress: progressEntry,
+      totalProgress,
+      periodCompleted: isPeriodCompleted,
+      goal: goalData,
+    },
+  });
+});
+
 
 // Get progress entries with filtering and pagination
 export const getProgress = asyncHandler(

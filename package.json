@@ -1,11 +1,10 @@
 {
   "name": "learnloop-backend",
   "version": "1.0.0",
-  "type": "module",
   "scripts": {
     "dev": "tsx watch --clear-screen=false src/server.ts --watch src",
     "build": "tsc",
-    "start": "node dist/index.js",
+    "start": "node dist/server.js",
     "lint": "eslint . --ext .ts",
     "format": "prettier --write ."
   },
@@ -20,7 +19,8 @@
     "dotenv": "^17.2.0",
     "express": "^5.1.0",
     "morgan": "^1.10.1",
-    "winston": "^3.17.0"
+    "winston": "^3.17.0",
+    "colors": "^1.4.0"
   },
   "devDependencies": {
     "@eslint/js": "^9.31.0",
@@ -31,7 +31,6 @@
     "@types/express": "^5.0.3",
     "@types/morgan": "^1.9.10",
     "@types/node": "^24.0.14",
-    "colors": "^1.4.0",
     "eslint": "^9.31.0",
     "globals": "^16.3.0",
     "ts-node": "^10.9.2",

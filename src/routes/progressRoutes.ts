@@ -7,6 +7,6 @@ const progressRouter = Router();
 progressRouter.use(requireAuth);
 
 progressRouter.post("/:goalId/", logProgress);
-progressRouter.get("/:goalId/stats", getProgressStats);
+progressRouter.get("/stats", getProgressStats);
 
 export default progressRouter;

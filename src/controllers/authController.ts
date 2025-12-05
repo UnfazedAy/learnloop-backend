@@ -29,6 +29,19 @@ export const signUp = asyncHandler(
 
     const { email, password, firstName, lastName, gender } = sanitizedData;
 
+    // Check if user already exists
+    const { data: userRows, error: userError } = await supabase
+      .from("user_profiles")
+      .select("*")
+      .eq("email", email.trim().toLowerCase())
+      .maybeSingle();
+    if (userError) {
+      return next(new ErrorResponse(userError.message, 400));
+    }
+    if (userRows) {
+      return next(new ErrorResponse(AUTH_MESSAGES.ERROR.EMAIL_EXISTS, 409));
+    }
+
     const { data: authData, error: signUpError } = await supabase.auth.signUp({
       email,
       password,
@@ -38,6 +51,7 @@ export const signUp = asyncHandler(
           last_name: lastName,
           gender,
         },
+        emailRedirectTo: 'http://localhost:5173/auth/callback',
       },
     });
 
@@ -94,7 +108,7 @@ export const login = asyncHandler(
     }
 
     if (!userRows) {
-      return next(new ErrorResponse("User not found", 404));
+      return next(new ErrorResponse("User not found, pls sign up first", 404));
     }
 
     const { data: authData, error: loginError } =
@@ -280,39 +294,45 @@ export const resetPassword = asyncHandler(
 );
 
 export const completeProfile = asyncHandler(
-  async (
-    req: Request<object, object, { accessToken: string }>,
-    res: Response,
-    next: NextFunction
-  ) => {
-    const { accessToken } = req.body;
+  async (req: Request, res: Response, next: NextFunction) => {
+    let token;
 
-    if (!accessToken) {
-      return next(new ErrorResponse(AUTH_MESSAGES.ERROR.TOKEN_INVALID, 400));
+    // Extract token from header
+    if (
+      req.headers.authorization &&
+      req.headers.authorization.startsWith("Bearer ")
+    ) {
+      token = req.headers.authorization.split(" ")[1];
     }
 
+    if (!token) {
+      return next(new ErrorResponse("Access token missing or invalid", 400));
+    }
+
+    // Validate Supabase user
     const { data: userData, error: userError } = await supabase.auth.getUser(
-      accessToken
+      token
     );
 
-    if (userError) {
+    if (userError || !userData?.user) {
       return next(
-        new ErrorResponse(`Unable to get user ${userError.message}`, 400)
+        new ErrorResponse(
+          `Unable to get user: ${userError?.message || "Invalid token"}`,
+          400
+        )
       );
     }
 
-    if (!userData) {
-      return next(new ErrorResponse("User not found", 404));
-    }
+    const user = userData.user;
 
-    // check if user profile is already complete
-    const { data: profileData, error: profileError } = await supabase
+    // Check existing profile
+    const { data: profileData } = await supabase
       .from("user_profiles")
       .select("*")
-      .eq("id", userData.user.id)
+      .eq("id", user.id)
       .maybeSingle();
 
-    if (profileData && !profileError) {
+    if (profileData) {
       return res.status(200).json({
         success: true,
         message: "Profile already complete",
@@ -326,28 +346,28 @@ export const completeProfile = asyncHandler(
       });
     }
 
-    // insert new profile
+    // Insert profile
+    const metadata = user.user_metadata;
+
     const { error: insertError } = await supabase.from("user_profiles").insert({
-      id: userData.user.id,
-      email: userData.user.email,
-      first_name: userData.user.user_metadata.first_name,
-      last_name: userData.user.user_metadata.last_name,
-      gender: userData.user.user_metadata.gender,
+      id: user.id,
+      email: user.email,
+      first_name: metadata.first_name,
+      last_name: metadata.last_name,
+      gender: metadata.gender,
     });
 
-    if (insertError) {
-      return next(new ErrorResponse(insertError.message, 400));
-    }
+    if (insertError) return next(new ErrorResponse(insertError.message, 400));
 
-    res.status(200).json({
+    return res.status(201).json({
       success: true,
       message: "Profile completed successfully",
       data: {
-        id: userData.user.id,
-        email: userData.user.email,
-        firstName: userData.user.user_metadata.first_name,
-        lastName: userData.user.user_metadata.last_name,
-        gender: userData.user.user_metadata.gender,
+        id: user.id,
+        email: user.email,
+        firstName: metadata.first_name,
+        lastName: metadata.last_name,
+        gender: metadata.gender,
       },
     });
   }

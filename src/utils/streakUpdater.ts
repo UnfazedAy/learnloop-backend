@@ -1,8 +1,19 @@
 import { supabase } from "../config/database";
+import { Frequency } from "../types/types";
 
-export async function updateStreak(userId: string, goalId: string, date: string) {
+/**
+ * Update streak after a period (day/week/month) is completed.
+ * - Daily → check yesterday
+ * - Weekly → check previous week
+ * - Monthly → check previous month
+ */
+export async function updateStreak(
+  userId: string,
+  goalId: string,
+  date: string,
+  frequency: Frequency
+) {
   try {
-    // Get existing streak
     const { data: existingStreak } = await supabase
       .from("streaks")
       .select("*")
@@ -10,44 +21,51 @@ export async function updateStreak(userId: string, goalId: string, date: string)
       .eq("goal_id", goalId)
       .single();
 
-    const yesterday = new Date(date);
-    yesterday.setDate(yesterday.getDate() - 1);
-    const yesterdayStr = yesterday.toISOString().split('T')[0];
+    const current = new Date(date);
+    const prevPeriodDate = new Date(current);
+
+    if (frequency === Frequency.DAILY) {
+      prevPeriodDate.setDate(current.getDate() - 1);
+
+    } else if (frequency === Frequency.WEEKLY) {
+      prevPeriodDate.setDate(current.getDate() - 7);
+
+    } else if (frequency === Frequency.MONTHLY) {
+      prevPeriodDate.setMonth(current.getMonth() - 1);
+    }
+
+    const prevPeriodStr = prevPeriodDate.toISOString().split("T")[0];
 
     if (existingStreak) {
-      let newCurrentStreak = 1;
-      
-      // If last completed date was yesterday, increment streak
-      if (existingStreak.last_completed_date === yesterdayStr) {
-        newCurrentStreak = existingStreak.current_streak + 1;
+      let newCurrent = 1;
+
+      if (existingStreak.last_completed_date === prevPeriodStr) {
+        newCurrent = existingStreak.current_streak + 1;
       }
-      
-      // Update best streak if current is higher
-      const newBestStreak = Math.max(existingStreak.best_streak, newCurrentStreak);
+
+      const newBest = Math.max(existingStreak.best_streak, newCurrent);
 
       await supabase
         .from("streaks")
         .update({
-          current_streak: newCurrentStreak,
-          best_streak: newBestStreak,
+          current_streak: newCurrent,
+          best_streak: newBest,
           last_completed_date: date,
-          updated_at: new Date()
+          updated_at: new Date(),
         })
         .eq("id", existingStreak.id);
+
     } else {
-      // Create new streak
-      await supabase
-        .from("streaks")
-        .insert({
-          user_id: userId,
-          goal_id: goalId,
-          current_streak: 1,
-          best_streak: 1,
-          last_completed_date: date
-        });
+      // Create first streak record
+      await supabase.from("streaks").insert({
+        user_id: userId,
+        goal_id: goalId,
+        current_streak: 1,
+        best_streak: 1,
+        last_completed_date: date,
+      });
     }
-  } catch (error) {
-    console.error('Error updating streak:', error);
-    // Don't throw error to avoid breaking progress logging
+  } catch (e) {
+    console.error("Error updating streak:", e);
   }
 }

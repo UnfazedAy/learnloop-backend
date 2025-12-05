@@ -5,3 +5,4 @@ dist
 logs
 .vscode
 deleteUser.js
+env.yaml
