@@ -14,7 +14,7 @@ const { NODE_ENV } = ENV;
 const app: Application = express();
 
 const corsOptions: CorsOptions = {
-  origin: NODE_ENV === "development" ? true : ["https://yourdomain.com"],
+  origin: true,
   credentials: true,
   methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH", "HEAD"],
   allowedHeaders: [

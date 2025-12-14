@@ -10,7 +10,6 @@ RUN npm ci --silent
 # Copy source and build
 COPY tsconfig.json ./
 COPY src ./src
-COPY . .
 
 RUN npm run build
 

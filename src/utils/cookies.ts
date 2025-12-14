@@ -1,15 +1,20 @@
-import { Response } from "express";
+import { Response, CookieOptions } from "express";
 import { ENV } from "../config/keys";
 import { TOKEN_EXPIRY } from "./constants";
 
 const { NODE_ENV } = ENV;
 
-// Helper function to set secure cookies
-export const setAuthCookies = (res: Response, accessToken: string, refreshToken: string) => {
-  const cookieOptions = {
+export const setAuthCookies = (
+  res: Response,
+  accessToken: string,
+  refreshToken: string
+) => {
+  const isProd = NODE_ENV === "production";
+
+  const cookieOptions: CookieOptions = {
     httpOnly: true,
-    secure: NODE_ENV === "production",
-    sameSite: "lax" as const,
+    secure: isProd,
+    sameSite: (isProd ? "none" : "lax") as CookieOptions["sameSite"],
     path: "/",
   };
 
@@ -24,12 +29,13 @@ export const setAuthCookies = (res: Response, accessToken: string, refreshToken:
   });
 };
 
-// Helper function to clear auth cookies
 export const clearAuthCookies = (res: Response) => {
-  const cookieOptions = {
+  const isProd = NODE_ENV === "production";
+
+  const cookieOptions: CookieOptions = {
     httpOnly: true,
-    secure: NODE_ENV === "production",
-    sameSite: "lax" as const,
+    secure: isProd,
+    sameSite: (isProd ? "none" : "lax") as CookieOptions["sameSite"],
     path: "/",
   };
 

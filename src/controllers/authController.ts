@@ -12,6 +12,13 @@ import {
   isValidPassword,
 } from "../utils/fieldsValidations";
 import logger from "../config/logger";
+import { ENV } from "../config/keys";
+
+const getRedirectURL = () => {
+  return ENV.NODE_ENV === "production"
+    ? ENV.FRONTEND_PROD_URL + "/auth/callback"
+    : ENV.FRONTEND_DEV_URL + "/auth/callback";
+}
 
 export const signUp = asyncHandler(
   async (
@@ -51,7 +58,7 @@ export const signUp = asyncHandler(
           last_name: lastName,
           gender,
         },
-        emailRedirectTo: 'http://localhost:5173/auth/callback',
+        emailRedirectTo: getRedirectURL(),
       },
     });
 
