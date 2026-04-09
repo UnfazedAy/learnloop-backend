@@ -1,4 +1,4 @@
-import express, { Application } from "express";
+import express, { Application, Request, Response } from "express";
 import cors, { CorsOptions } from "cors";
 import cookieParser from "cookie-parser";
 import morgan from "morgan";
@@ -46,7 +46,7 @@ app.use("/api/v1/progress", progressRouter);
 app.use(errorHandler);
 
 // Catch-all route for 404
-app.use((req, res) => {
+app.use((req: Request, res: Response) => {
   res.status(404).json({
     success: false,
     message: "Invalid route, please check the URL properly if you are sure this route exists.",
