@@ -1,9 +1,62 @@
+import { Request, Response, NextFunction } from "express";
 import { supabase } from "../config/database";
 import { asyncHandler } from "../middleWares/errorHandler";
 import ErrorResponse from "../utils/errorResponse";
-import { Request, Response, NextFunction } from "express";
-import { ProgressEntry, Frequency } from "../types/types";
+import { ProgressEntry } from "../types/types";
+import { formatDateOnly, getPeriodRange } from "../utils/periodRange";
 import { updateStreak } from "../utils/streakUpdater";
+
+type GoalRecord = {
+  id: string;
+  title: string;
+  goal_type: string;
+  target_value: number;
+  target_unit: string;
+  frequency: string;
+  user_id: string;
+};
+
+type ProgressEntryWithGoal = {
+  id: string;
+  user_id: string;
+  goal_id: string;
+  date: string;
+  value: number;
+  notes?: string | null;
+  created_at?: string;
+  updated_at?: string;
+  goals: GoalRecord;
+};
+
+type GoalGroup = {
+  goal: GoalRecord;
+  entries: ProgressEntryWithGoal[];
+  completedDays: number;
+};
+
+const roundToTwo = (value: number) => Math.round(value * 100) / 100;
+
+const getDateRangeForPeriod = (period: string, today: Date) => {
+  const startDate = new Date(today);
+
+  switch (period) {
+    case "week":
+      startDate.setDate(today.getDate() - 7);
+      break;
+    case "year":
+      startDate.setFullYear(today.getFullYear() - 1);
+      break;
+    case "month":
+    default:
+      startDate.setMonth(today.getMonth() - 1);
+      break;
+  }
+
+  return {
+    startDate: formatDateOnly(startDate),
+    endDate: formatDateOnly(today),
+  };
+};
 
 export const logProgress = asyncHandler(async (
   req: Request<{ goalId: string }, object, ProgressEntry>,
@@ -14,23 +67,23 @@ export const logProgress = asyncHandler(async (
   const { id: userId } = req.user;
   const { goalId } = req.params;
 
-  if (value == null || value < 0)
+  if (value == null || value < 0) {
     return next(new ErrorResponse("Progress value must be >= 0", 400));
+  }
 
-  // Fetch goal
   const { data: goalData, error: goalErr } = await supabase
     .from("goals")
     .select("*")
     .eq("id", goalId)
     .eq("user_id", userId)
-    .single();
+    .single<GoalRecord>();
 
-  if (goalErr || !goalData)
+  if (goalErr || !goalData) {
     return next(new ErrorResponse("Goal not found", 404));
+  }
 
-  const today = new Date().toISOString().split("T")[0];
+  const today = formatDateOnly(new Date());
 
-  // Check if today's progress exists
   const { data: existing } = await supabase
     .from("progress_entries")
     .select("*")
@@ -55,7 +108,6 @@ export const logProgress = asyncHandler(async (
 
     if (error) return next(new ErrorResponse(error.message, 500));
     progressEntry = data;
-
   } else {
     const { data, error } = await supabase
       .from("progress_entries")
@@ -73,37 +125,10 @@ export const logProgress = asyncHandler(async (
     progressEntry = data;
   }
 
-  // -----------------------------------------------------
-  // PERIOD COMPLETION LOGIC
-  // -----------------------------------------------------
+  const { start, end } = getPeriodRange(goalData.frequency, new Date());
+  const startStr = formatDateOnly(start);
+  const endStr = formatDateOnly(end);
 
-  const now = new Date();
-  let periodStart = new Date(now);
-  let periodEnd = new Date(now);
-
-  if (goalData.frequency === Frequency.DAILY) {
-    // Start and end are today — no change needed
-  }
-
-  if (goalData.frequency === Frequency.WEEKLY) {
-    // Monday: 1, Sunday: 0
-    const day = now.getDay();
-    const mondayOffset = day === 0 ? -6 : 1 - day;
-
-    periodStart.setDate(now.getDate() + mondayOffset);
-    periodEnd = new Date(periodStart);
-    periodEnd.setDate(periodStart.getDate() + 6);
-  }
-
-  if (goalData.frequency === Frequency.MONTHLY) {
-    periodStart = new Date(now.getFullYear(), now.getMonth(), 1);
-    periodEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0);
-  }
-
-  const startStr = periodStart.toISOString().split("T")[0];
-  const endStr = periodEnd.toISOString().split("T")[0];
-
-  // Sum progress for entire period
   const { data: periodRows } = await supabase
     .from("progress_entries")
     .select("value")
@@ -112,13 +137,15 @@ export const logProgress = asyncHandler(async (
     .gte("date", startStr)
     .lte("date", endStr);
 
-  const totalProgress = (periodRows || []).reduce((sum, p) => sum + p.value, 0);
+  const totalProgress = (periodRows || []).reduce(
+    (sum, row) => sum + Number(row.value || 0),
+    0
+  );
 
   const isPeriodCompleted = totalProgress >= goalData.target_value;
 
-  // Update streak only when period completes
   if (isPeriodCompleted) {
-    await updateStreak(userId, goalId, today, goalData.frequency);
+    await updateStreak(userId, goalId, today, goalData.frequency as never);
   }
 
   return res.status(200).json({
@@ -133,162 +160,26 @@ export const logProgress = asyncHandler(async (
   });
 });
 
-
-// Get progress entries with filtering and pagination
 export const getProgress = asyncHandler(
   async (req: Request, res: Response, next: NextFunction) => {
     const userId = req.user.id;
-
-    // Pagination parameters
     const page = parseInt(req.query.page as string) || 1;
     const limit = Math.max(1, parseInt(req.query.limit as string) || 20);
     const offset = (page - 1) * limit;
-
-    // Filtering parameters
     const { goalId, startDate, endDate, dateRange } = req.query;
 
-    // Date range helpers
     const dateFilter: { start?: string; end?: string } = {};
-    
+
     if (startDate && endDate) {
       dateFilter.start = startDate as string;
       dateFilter.end = endDate as string;
     } else if (dateRange) {
       const today = new Date();
-      switch (dateRange) {
-        case 'week': {
-          const weekStart = new Date(today);
-          weekStart.setDate(today.getDate() - 7);
-          dateFilter.start = weekStart.toISOString().split('T')[0];
-          dateFilter.end = today.toISOString().split('T')[0];
-          break;
-        }
-        case 'month': {
-          const monthStart = new Date(today);
-          monthStart.setMonth(today.getMonth() - 1);
-          dateFilter.start = monthStart.toISOString().split('T')[0];
-          dateFilter.end = today.toISOString().split('T')[0];
-          break;
-        }
-        case 'year': {
-          const yearStart = new Date(today);
-          yearStart.setFullYear(today.getFullYear() - 1);
-          dateFilter.start = yearStart.toISOString().split('T')[0];
-          dateFilter.end = today.toISOString().split('T')[0];
-          break;
-        }
-      }
+      const range = getDateRangeForPeriod(dateRange as string, today);
+      dateFilter.start = range.startDate;
+      dateFilter.end = range.endDate;
     }
 
-    // Build query
-    let query = supabase
-      .from("progress_entries")
-      .select(`
-        *,
-        goals (
-          id,
-          title,
-          goal_type,
-          target_value,
-          target_unit
-        )
-      `)
-      .eq("user_id", userId)
-      .order("date", { ascending: false });
-
-    // Apply filters
-    if (goalId) {
-      query = query.eq("goal_id", goalId);
-    }
-
-    if (dateFilter.start && dateFilter.end) {
-      query = query.gte("date", dateFilter.start).lte("date", dateFilter.end);
-    }
-
-    // Get total count
-    const countQuery = supabase
-      .from("progress_entries")
-      .select("*", { count: "exact", head: true })
-      .eq("user_id", userId);
-
-    // Apply same filters to count query
-    if (goalId) countQuery.eq("goal_id", goalId);
-    if (dateFilter.start && dateFilter.end) {
-      countQuery.gte("date", dateFilter.start).lte("date", dateFilter.end);
-    }
-
-    const { count: totalCount, error: countError } = await countQuery;
-
-    if (countError) {
-      return next(new ErrorResponse(countError.message, 500));
-    }
-
-    // Execute main query with pagination
-    const { data, error } = await query.range(offset, offset + limit - 1);
-
-    if (error) {
-      return next(new ErrorResponse(error.message, 500));
-    }
-
-    // Calculate pagination metadata
-    const totalPages = Math.ceil((totalCount || 0) / limit);
-    const hasNextPage = page < totalPages;
-    const hasPreviousPage = page > 1;
-
-    res.status(200).json({
-      success: true,
-      data,
-      message: "Progress entries retrieved successfully",
-      pagination: {
-        currentPage: page,
-        totalPages,
-        totalCount: totalCount || 0,
-        limit,
-        hasNextPage,
-        hasPreviousPage,
-      },
-      filters: {
-        goalId: goalId || null,
-        dateRange: dateRange || null,
-        startDate: dateFilter.start || null,
-        endDate: dateFilter.end || null,
-      },
-    });
-  }
-);
-
-// Get progress statistics and analytics
-export const getProgressStats = asyncHandler(
-  async (req: Request, res: Response, next: NextFunction) => {
-    const userId = req.user.id;
-    const { goalId, period = 'month' } = req.query;
-
-    // Calculate date range based on period
-    const today = new Date();
-    let startDate: Date;
-
-    switch (period) {
-      case 'week':
-        startDate = new Date(today);
-        startDate.setDate(today.getDate() - 7);
-        break;
-      case 'month':
-        startDate = new Date(today);
-        startDate.setMonth(today.getMonth() - 1);
-        break;
-      case 'year':
-        startDate = new Date(today);
-        startDate.setFullYear(today.getFullYear() - 1);
-        break;
-      default:
-        startDate = new Date(today);
-        startDate.setMonth(today.getMonth() - 1);
-    }
-
-    const startDateStr = startDate.toISOString().split('T')[0];
-    const endDateStr = today.toISOString().split('T')[0];
-
-    // Build base query
     let query = supabase
       .from("progress_entries")
       .select(`
@@ -303,8 +194,90 @@ export const getProgressStats = asyncHandler(
         )
       `)
       .eq("user_id", userId)
-      .gte("date", startDateStr)
-      .lte("date", endDateStr);
+      .order("date", { ascending: false });
+
+    if (goalId) {
+      query = query.eq("goal_id", goalId);
+    }
+
+    if (dateFilter.start && dateFilter.end) {
+      query = query.gte("date", dateFilter.start).lte("date", dateFilter.end);
+    }
+
+    let countQuery = supabase
+      .from("progress_entries")
+      .select("*", { count: "exact", head: true })
+      .eq("user_id", userId);
+
+    if (goalId) {
+      countQuery = countQuery.eq("goal_id", goalId);
+    }
+
+    if (dateFilter.start && dateFilter.end) {
+      countQuery = countQuery
+        .gte("date", dateFilter.start)
+        .lte("date", dateFilter.end);
+    }
+
+    const { count: totalCount, error: countError } = await countQuery;
+
+    if (countError) {
+      return next(new ErrorResponse(countError.message, 500));
+    }
+
+    const { data, error } = await query.range(offset, offset + limit - 1);
+
+    if (error) {
+      return next(new ErrorResponse(error.message, 500));
+    }
+
+    const totalPages = Math.ceil((totalCount || 0) / limit);
+
+    res.status(200).json({
+      success: true,
+      data,
+      message: "Progress entries retrieved successfully",
+      pagination: {
+        currentPage: page,
+        totalPages,
+        totalCount: totalCount || 0,
+        limit,
+        hasNextPage: page < totalPages,
+        hasPreviousPage: page > 1,
+      },
+      filters: {
+        goalId: goalId || null,
+        dateRange: dateRange || null,
+        startDate: dateFilter.start || null,
+        endDate: dateFilter.end || null,
+      },
+    });
+  }
+);
+
+export const getProgressStats = asyncHandler(
+  async (req: Request, res: Response, next: NextFunction) => {
+    const userId = req.user.id;
+    const { goalId, period = "month" } = req.query;
+    const today = new Date();
+    const { startDate, endDate } = getDateRangeForPeriod(period as string, today);
+
+    let query = supabase
+      .from("progress_entries")
+      .select(`
+        *,
+        goals (
+          id,
+          title,
+          goal_type,
+          target_value,
+          target_unit,
+          frequency
+        )
+      `)
+      .eq("user_id", userId)
+      .gte("date", startDate)
+      .lte("date", endDate);
 
     if (goalId) {
       query = query.eq("goal_id", goalId);
@@ -316,96 +289,142 @@ export const getProgressStats = asyncHandler(
       return next(new ErrorResponse(error.message, 500));
     }
 
-    // Calculate statistics
+    const typedProgress = (progressData || []) as ProgressEntryWithGoal[];
+
     const stats = {
-      totalEntries: progressData.length,
-      totalDaysTracked: new Set(progressData.map(p => p.date)).size,
+      totalEntries: typedProgress.length,
+      totalDaysTracked: new Set(typedProgress.map((entry) => entry.date)).size,
       averageProgress: 0,
       completionRate: 0,
-      goalBreakdown: {} as Record<string, {
-        goalTitle: string;
-        totalEntries: number;
-        completedDays: number;
-        completionRate: number;
-        averageValue: number;
+      goalBreakdown: {} as Record<
+        string,
+        {
+          goalTitle: string;
+          targetValue: number;
+          targetUnit: string;
+          frequency: string;
+          totalEntries: number;
+          completedDays: number;
+          completionRate: number;
+          averageValue: number;
+          currentPeriodProgress: number;
+          currentProgressPercentage: number;
+          remainingToTarget: number;
+          currentPeriodStart: string;
+          currentPeriodEnd: string;
+        }
+      >,
+      dailyProgress: [] as Array<{
+        date: string;
+        totalValue: number;
+        entriesCount: number;
+        goalsCompleted: number;
       }>,
-      dailyProgress: [] as { date: string; totalValue: number; entriesCount: number; goalsCompleted: number }[],
     };
 
-    if (progressData.length > 0) {
-      // Calculate averages and completion rates
-      const totalProgress = progressData.reduce((sum, entry) => sum + entry.value, 0);
-      stats.averageProgress = Math.round(totalProgress / progressData.length * 100) / 100;
+    if (typedProgress.length > 0) {
+      const totalProgress = typedProgress.reduce(
+        (sum, entry) => sum + Number(entry.value || 0),
+        0
+      );
+      stats.averageProgress = roundToTwo(totalProgress / typedProgress.length);
 
-      // Group by goals for breakdown
-      const goalGroups = progressData.reduce((acc, entry) => {
-        const goalId = entry.goal_id;
-        if (!acc[goalId]) {
-          acc[goalId] = {
-            goal: entry.goals,
-            entries: [],
-            completedDays: 0
-          };
-        }
-        acc[goalId].entries.push(entry);
-        
-        // Check if target was met
-        if (entry.value >= entry.goals.target_value) {
-          acc[goalId].completedDays++;
-        }
-        
-        return acc;
-      }, {} as Record<string, {
-        date: string;
-        entries: Array<{
-          goalId: string;
-          goalTitle: string;
-          value: number;
-          targetValue: number;
-          unit: string;
-          completed: boolean;
-          notes: string;
-        }>;
-        totalProgress: number;
-        goalsCompleted: number;
-        hasActivity: boolean;
-      }>);
+      const goalGroups = typedProgress.reduce<Record<string, GoalGroup>>(
+        (acc, entry) => {
+          if (!acc[entry.goal_id]) {
+            acc[entry.goal_id] = {
+              goal: entry.goals,
+              entries: [],
+              completedDays: 0,
+            };
+          }
 
-      // Calculate completion rate and goal breakdown
+          acc[entry.goal_id].entries.push(entry);
+
+          if (entry.value >= entry.goals.target_value) {
+            acc[entry.goal_id].completedDays += 1;
+          }
+
+          return acc;
+        },
+        {}
+      );
+
       let totalCompletedDays = 0;
-      Object.keys(goalGroups).forEach(goalId => {
-        const group = goalGroups[goalId];
+
+      Object.entries(goalGroups).forEach(([currentGoalId, group]) => {
         const completionRate = (group.completedDays / group.entries.length) * 100;
-        
-        stats.goalBreakdown[goalId] = {
+        const { start, end } = getPeriodRange(group.goal.frequency, today);
+        const currentPeriodStart = formatDateOnly(start);
+        const currentPeriodEnd = formatDateOnly(end);
+        const currentPeriodProgress = roundToTwo(
+          group.entries
+            .filter(
+              (entry) =>
+                entry.date >= currentPeriodStart && entry.date <= currentPeriodEnd
+            )
+            .reduce((sum, entry) => sum + Number(entry.value || 0), 0)
+        );
+        const currentProgressPercentage =
+          group.goal.target_value > 0
+            ? roundToTwo(
+                Math.min(
+                  100,
+                  (currentPeriodProgress / group.goal.target_value) * 100
+                )
+              )
+            : 0;
+
+        stats.goalBreakdown[currentGoalId] = {
           goalTitle: group.goal.title,
+          targetValue: group.goal.target_value,
+          targetUnit: group.goal.target_unit,
+          frequency: group.goal.frequency,
           totalEntries: group.entries.length,
           completedDays: group.completedDays,
-          completionRate: Math.round(completionRate * 100) / 100,
-          averageValue: Math.round((group.entries.reduce((sum: number, e: { value: number }) => sum + e.value, 0) / group.entries.length) * 100) / 100
+          completionRate: roundToTwo(completionRate),
+          averageValue: roundToTwo(
+            group.entries.reduce((sum, entry) => sum + Number(entry.value || 0), 0) /
+              group.entries.length
+          ),
+          currentPeriodProgress,
+          currentProgressPercentage,
+          remainingToTarget: roundToTwo(
+            Math.max(0, group.goal.target_value - currentPeriodProgress)
+          ),
+          currentPeriodStart,
+          currentPeriodEnd,
         };
-        
+
         totalCompletedDays += group.completedDays;
       });
 
-      stats.completionRate = Math.round((totalCompletedDays / progressData.length) * 100 * 100) / 100;
+      stats.completionRate = roundToTwo(
+        (totalCompletedDays / typedProgress.length) * 100
+      );
 
-      // Prepare daily progress for charts
-      const dailyGroups = progressData.reduce((acc, entry) => {
-        if (!acc[entry.date]) {
-          acc[entry.date] = [];
-        }
-        acc[entry.date].push(entry);
-        return acc;
-      }, {} as Record<string, typeof progressData>);
+      const dailyGroups = typedProgress.reduce<Record<string, ProgressEntryWithGoal[]>>(
+        (acc, entry) => {
+          if (!acc[entry.date]) {
+            acc[entry.date] = [];
+          }
+          acc[entry.date].push(entry);
+          return acc;
+        },
+        {}
+      );
 
       stats.dailyProgress = Object.keys(dailyGroups)
         .sort()
-        .map(date => ({
+        .map((date) => ({
           date,
-          totalValue: dailyGroups[date].reduce((sum: number, entry: ProgressEntry) => sum + entry.value, 0),
+          totalValue: roundToTwo(
+            dailyGroups[date].reduce((sum, entry) => sum + Number(entry.value || 0), 0)
+          ),
           entriesCount: dailyGroups[date].length,
-          goalsCompleted: dailyGroups[date].filter((entry: ProgressEntry & { goals: { target_value: number } }) => entry.value >= entry.goals.target_value).length
+          goalsCompleted: dailyGroups[date].filter(
+            (entry) => entry.value >= entry.goals.target_value
+          ).length,
         }));
     }
 
@@ -417,26 +436,21 @@ export const getProgressStats = asyncHandler(
   }
 );
 
-// Get progress for calendar view
 export const getProgressCalendar = asyncHandler(
   async (req: Request, res: Response, next: NextFunction) => {
     const userId = req.user.id;
     const { year, month } = req.params;
-    
-    // Validate year and month
     const yearNum = parseInt(year);
     const monthNum = parseInt(month);
-    
+
     if (isNaN(yearNum) || isNaN(monthNum) || monthNum < 1 || monthNum > 12) {
       return next(new ErrorResponse("Invalid year or month", 400));
     }
 
-    // Calculate start and end dates for the month
     const startDate = new Date(yearNum, monthNum - 1, 1);
-    const endDate = new Date(yearNum, monthNum, 0); // Last day of month
-    
-    const startDateStr = startDate.toISOString().split('T')[0];
-    const endDateStr = endDate.toISOString().split('T')[0];
+    const endDate = new Date(yearNum, monthNum, 0);
+    const startDateStr = formatDateOnly(startDate);
+    const endDateStr = formatDateOnly(endDate);
 
     const { data, error } = await supabase
       .from("progress_entries")
@@ -459,50 +473,56 @@ export const getProgressCalendar = asyncHandler(
       return next(new ErrorResponse(error.message, 500));
     }
 
-    // Group progress by date
-    const calendarData = data.reduce((acc, entry) => {
-      const date = entry.date;
-      if (!acc[date]) {
-        acc[date] = {
-          date,
+    const typedData = (data || []) as ProgressEntryWithGoal[];
+
+    const calendarData = typedData.reduce<
+      Record<
+        string,
+        {
+          date: string;
+          entries: Array<{
+            goalId: string;
+            goalTitle: string;
+            value: number;
+            targetValue: number;
+            unit: string;
+            completed: boolean;
+            notes?: string | null;
+          }>;
+          totalProgress: number;
+          goalsCompleted: number;
+          hasActivity: boolean;
+        }
+      >
+    >((acc, entry) => {
+      if (!acc[entry.date]) {
+        acc[entry.date] = {
+          date: entry.date,
           entries: [],
           totalProgress: 0,
           goalsCompleted: 0,
-          hasActivity: true
+          hasActivity: true,
         };
       }
-      
-      acc[date].entries.push({
+
+      acc[entry.date].entries.push({
         goalId: entry.goal_id,
         goalTitle: entry.goals.title,
         value: entry.value,
         targetValue: entry.goals.target_value,
         unit: entry.goals.target_unit,
         completed: entry.value >= entry.goals.target_value,
-        notes: entry.notes
+        notes: entry.notes,
       });
-      
-      acc[date].totalProgress += entry.value;
+
+      acc[entry.date].totalProgress += entry.value;
+
       if (entry.value >= entry.goals.target_value) {
-        acc[date].goalsCompleted++;
+        acc[entry.date].goalsCompleted += 1;
       }
-      
+
       return acc;
-    }, {} as Record<string, {
-      date: string;
-      entries: Array<{
-        goalId: string;
-        goalTitle: string;
-        value: number;
-        targetValue: number;
-        unit: string;
-        completed: boolean;
-        notes: string;
-      }>;
-      totalProgress: number;
-      goalsCompleted: number;
-      hasActivity: boolean;
-    }>);
+    }, {});
 
     res.status(200).json({
       success: true,
@@ -512,13 +532,11 @@ export const getProgressCalendar = asyncHandler(
   }
 );
 
-// Delete progress entry
 export const deleteProgress = asyncHandler(
   async (req: Request, res: Response, next: NextFunction) => {
     const { progressId } = req.params;
     const userId = req.user.id;
 
-    // Check if progress entry exists and belongs to user
     const { data: progressEntry, error: fetchError } = await supabase
       .from("progress_entries")
       .select("*")
@@ -532,7 +550,6 @@ export const deleteProgress = asyncHandler(
       );
     }
 
-    // Delete the progress entry
     const { error: deleteError } = await supabase
       .from("progress_entries")
       .delete()
@@ -541,9 +558,6 @@ export const deleteProgress = asyncHandler(
     if (deleteError) {
       return next(new ErrorResponse(deleteError.message, 500));
     }
-
-    // TODO: Recalculate streaks if this was a completed goal day
-    // This would require more complex logic to check other goals for that date
 
     res.status(200).json({
       success: true,

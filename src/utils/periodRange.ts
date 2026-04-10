@@ -1,21 +1,39 @@
+import { Frequency } from "../types/types";
+
+const toDateOnly = (date: Date) => {
+  const normalized = new Date(date);
+  normalized.setHours(0, 0, 0, 0);
+  return normalized;
+};
+
 function getPeriodRange(frequency: string, date: Date) {
-  let start: Date, end: Date;
+  const baseDate = toDateOnly(date);
+  let start: Date;
+  let end: Date;
+
   switch (frequency) {
-    case "weekly":
-      start = new Date(date);
-      start.setDate(date.getDate() - date.getDay()); // Sunday start
+    case Frequency.WEEKLY: {
+      const day = baseDate.getDay();
+      const mondayOffset = day === 0 ? -6 : 1 - day;
+      start = new Date(baseDate);
+      start.setDate(baseDate.getDate() + mondayOffset);
       end = new Date(start);
       end.setDate(start.getDate() + 6);
       break;
-    case "monthly":
-      start = new Date(date.getFullYear(), date.getMonth(), 1);
-      end = new Date(date.getFullYear(), date.getMonth() + 1, 0);
+    }
+    case Frequency.MONTHLY:
+      start = new Date(baseDate.getFullYear(), baseDate.getMonth(), 1);
+      end = new Date(baseDate.getFullYear(), baseDate.getMonth() + 1, 0);
       break;
-    default: // daily
-      start = new Date(date);
-      end = new Date(date);
+    case Frequency.DAILY:
+    default:
+      start = new Date(baseDate);
+      end = new Date(baseDate);
   }
+
   return { start, end };
 }
 
-export { getPeriodRange };
+const formatDateOnly = (date: Date) => toDateOnly(date).toISOString().split("T")[0];
+
+export { formatDateOnly, getPeriodRange };

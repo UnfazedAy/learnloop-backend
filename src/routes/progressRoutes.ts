@@ -1,12 +1,17 @@
 import { Router } from "express";
 import { requireAuth } from "../middleWares/authMiddleware.js";
-import { logProgress, getProgressStats } from "../controllers/progressController";
+import {
+  getProgress,
+  getProgressStats,
+  logProgress,
+} from "../controllers/progressController";
 
 const progressRouter = Router();
 
 progressRouter.use(requireAuth);
 
-progressRouter.post("/:goalId/", logProgress);
+progressRouter.get("/", getProgress);
 progressRouter.get("/stats", getProgressStats);
+progressRouter.post("/:goalId/", logProgress);
 
 export default progressRouter;
